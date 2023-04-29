@@ -1,3 +1,4 @@
+# install.packages(c("tidyverse", "tidycensus", "sf", "terra", "spData", "spDataLarge", "tigris", "ggplot2", "gridExtra", "dplyr", "units", "ggdag"))
 library(tidyverse)
 library(tidycensus)
 library(sf)
@@ -9,14 +10,47 @@ library(ggplot2)
 library(gridExtra)
 library(dplyr)
 library(units)
+library(ggdag)
+library(MatchIt)
+library(lfe)
+library(estimatr)
+library(optmatch)
+library(modelsummary)
+library(flextable)
+
 
 census_api_key("511be8d24286614f61800bdda6520c88c5e27594")
 
+
+# let's make a DAG
+coord_dag <- list(
+  x = c(PM = 0, BC = 1, HD = 2, CP = 1),
+  y = c(PM = 1, BC = 1.75, HD = 1, CP = 0.25)
+)
+
+maindag <- ggdag::dagify(BC ~ PM,
+                         HD ~ BC, 
+                         PM ~ CP,
+                         HD ~ PM,
+                         HD ~ CP,
+                         labels = c("PM" = "Parking\n Minimums",
+                                    "BC" = "Building\n Costs",
+                                    "HD" = "Housing\n Density",
+                                    "CP" = "Community\n Politics"),
+                         coords = coord_dag) 
+
+ggdag::ggdag(maindag,
+             text = FALSE,
+             use_labels = "label",
+             label_col = "maroon",
+             node_size = 18) + 
+  theme_void() + 
+  ggtitle("Directed Acyclic Graph of Variables") 
+
+
 # get variable names
 v10 <- load_variables(2010, "pl", cache = TRUE)
-view(v10)
 v20 <- load_variables(2020, "pl", cache = TRUE)
-view(v20)
 
 # find data for only treatment blocks
 tracts <- tracts(state = "NY", county = "Onondaga", cb = TRUE)
@@ -32,13 +66,6 @@ onon10 <- get_decennial(geography = "block",
 # isolate housing units only for treatment area
 treatarea10 <- st_intersection(onon10, treat_shape)
 
-# visualizing data for this area
-treatplot10 <- treatarea10 %>%
-  ggplot(aes(fill = value)) + 
-  geom_sf(color = "black", size = 1) + 
-  scale_fill_viridis_c(option = "C", limits = c(1, 800), name = "Housing Units") +
-  ggtitle("2010 Housing Units in Treatment Area")
-
 
 # doing the same for 2020:
 onon20 <- get_decennial(geography = "block", 
@@ -48,18 +75,81 @@ onon20 <- get_decennial(geography = "block",
                         year = 2020,
                         geometry = TRUE)
 treatarea20 <- st_intersection(onon20, treat_shape)
-treatplot20 <- treatarea20 %>%
-  ggplot(aes(fill = value)) + 
-  geom_sf(color = "black", size = 1)  +
-  scale_fill_viridis_c(option = "C", limits = c(1, 800), name = "Housing Units") +
-  ggtitle("2020 Housing Units in Treatment Area")
-
-# putting both plots side by side
-grid.arrange(treatplot10, treatplot20, ncol = 2)
 
 # fix any geometric areas in the polygons
 treatarea10 <- st_make_valid(treatarea10)
 treatarea20 <- st_make_valid(treatarea20)
+
+# make the name for the variable name the same 
+treatarea10 <- treatarea10 |>
+  mutate(varname = case_when(variable == "H001001" ~ "housing units"))
+treatarea20 <- treatarea20 |>
+  mutate(varname = case_when(variable == "H1_001N" ~ "housing units"))
+
+# add a year component 
+treatarea10 <- treatarea10 |>
+  mutate(year = case_when(value > -1 ~ 2010))
+treatarea20 <- treatarea20 |>
+  mutate(year = case_when(value > -1 ~ 2020))
+
+# make the geoid variable better
+treatarea10 <- treatarea10 |>
+  mutate(geonum = as.numeric(GEOID))
+treatarea10 <- treatarea10 |>
+  mutate(bettergeo = geonum - 360670000000000)
+treatarea20 <- treatarea20 |>
+  mutate(geonum = as.numeric(GEOID))
+treatarea20 <- treatarea20 |>
+  mutate(bettergeo = geonum - 360670000000000)
+
+# remove blocks from outside the census tract
+treatarea10 <- treatarea10 |>
+  filter(bettergeo > 32000000 & bettergeo < 33000000)
+treatarea20 <- treatarea20 |>
+  filter(bettergeo > 32000000 & bettergeo < 33000000)
+
+#make the geoid variable even better 
+treatarea10 <- treatarea10 |>
+  mutate(bestgeo = bettergeo - 32000000)
+treatarea20 <- treatarea20 |>
+  mutate(bestgeo = bettergeo - 32000000)
+
+# visualizing data for this area
+treatplot10 <- treatarea10 %>%
+  ggplot(aes(fill = value)) + 
+  geom_sf(color = "black", size = 1) + 
+  scale_fill_viridis_c(option = "C", limits = c(1, 800), name = "Housing Units") +
+  ggtitle("2010 Housing Units in Treatment Area") +
+  theme_minimal() +
+  theme(axis.line=element_blank(),axis.text.x=element_blank(), 
+        axis.text.y=element_blank(),axis.ticks=element_blank(),
+        axis.title.x=element_blank(), axis.title.y=element_blank())
+
+# and for 2020
+treatplot20 <- treatarea20 %>%
+  ggplot(aes(fill = value)) + 
+  geom_sf(color = "black", size = 1)  +
+  scale_fill_viridis_c(option = "C", limits = c(1, 800), name = "Housing Units") +
+  ggtitle("2020 Housing Units in Treatment Area") +
+  theme_minimal()+
+  theme(axis.line=element_blank(),axis.text.x=element_blank(), 
+        axis.text.y=element_blank(),axis.ticks=element_blank(),
+        axis.title.x=element_blank(), axis.title.y=element_blank())
+
+# putting both plots side by side
+grid.arrange(treatplot10, treatplot20, ncol = 2)
+
+# changing boundaries
+treatplotoverlap <- ggplot() +
+  geom_sf(data = treatarea10, color = "black", alpha = .2) + 
+  geom_sf(data = treatarea20, color = "red", alpha = .2)+
+  scale_fill_viridis_c(option = "C", limits = c(1, 800), name = "Housing Units") +
+  ggtitle("Block Borders Treatment Area") +
+  theme_minimal()+
+  theme(axis.line=element_blank(),axis.text.x=element_blank(), 
+        axis.text.y=element_blank(),axis.ticks=element_blank(),
+        axis.title.x=element_blank(), axis.title.y=element_blank())
+treatplotoverlap
 
 # calculate the area of each block
 treatarea10 <- treatarea10 %>% 
@@ -83,7 +173,11 @@ treatdensplot10 <- treatarea10 |>
   scale_fill_viridis_c(option = "C", 
                        name = "Housing Units per Square KM", 
                        limits = set_units(c(1, 60100))) +
-  ggtitle("2010 Housing Density in Treatment Area")
+  ggtitle("2010 Housing Density in Treatment Area") +
+  theme_minimal() +
+  theme(axis.line=element_blank(),axis.text.x=element_blank(), 
+        axis.text.y=element_blank(),axis.ticks=element_blank(),
+        axis.title.x=element_blank(), axis.title.y=element_blank())
 treatdensplot20 <- treatarea20 |>
   filter(!is.nan(density)) |>
   ggplot(aes(fill = density)) + 
@@ -91,7 +185,11 @@ treatdensplot20 <- treatarea20 |>
   scale_fill_viridis_c(option = "C", 
                        name = "Housing Units per Square KM", 
                        limits = set_units(c(1, 60100))) +
-  ggtitle("2020 Housing Density in Treatment Area")
+  ggtitle("2020 Housing Density in Treatment Area") +
+  theme_minimal() +
+  theme(axis.line=element_blank(),axis.text.x=element_blank(), 
+        axis.text.y=element_blank(),axis.ticks=element_blank(),
+        axis.title.x=element_blank(), axis.title.y=element_blank())
 grid.arrange(treatdensplot10, treatdensplot20, ncol = 2)
 
 # creating an ln variable for density
@@ -113,7 +211,11 @@ treatlnplot10 <- treatarea10 |>
   scale_fill_viridis_c(option = "C", 
                        name = "Log of Housing Units per Square KM", 
                        limits = set_units(c(1, 17))) +
-  ggtitle("2010 Log of Housing Density in Treatment Area")
+  ggtitle("2010 Log of Housing Density in Treatment Area") +
+  theme_minimal() +
+  theme(axis.line=element_blank(),axis.text.x=element_blank(), 
+        axis.text.y=element_blank(),axis.ticks=element_blank(),
+        axis.title.x=element_blank(), axis.title.y=element_blank())
 treatlnplot20 <- treatarea20 |>
   filter(!is.nan(logdens)) |>
   ggplot(aes(fill = logdens)) + 
@@ -121,7 +223,11 @@ treatlnplot20 <- treatarea20 |>
   scale_fill_viridis_c(option = "C", 
                        name = "Log of Housing Units per Square KM", 
                        limits = set_units(c(1, 17))) +
-  ggtitle("2020 Log of Housing Density in Treatment Area")
+  ggtitle("2020 Log of Housing Density in Treatment Area") +
+  theme_minimal() +
+  theme(axis.line=element_blank(),axis.text.x=element_blank(), 
+        axis.text.y=element_blank(),axis.ticks=element_blank(),
+        axis.title.x=element_blank(), axis.title.y=element_blank())
 grid.arrange(treatlnplot10, treatlnplot20, ncol = 2)
 
 # plot them all
@@ -168,14 +274,33 @@ controlplot10 <- controlarea10 %>%
   ggplot(aes(fill = value)) + 
   geom_sf(color = "black", size = 1) + 
   scale_fill_viridis_c(option = "C", limits = c(1, 800), name = "Housing Units") +
-  ggtitle("2010 Housing Units in Control Area")
+  ggtitle("2010 Housing Units in Control Area") +
+  theme_minimal() +
+  theme(axis.line=element_blank(),axis.text.x=element_blank(), 
+        axis.text.y=element_blank(),axis.ticks=element_blank(),
+        axis.title.x=element_blank(), axis.title.y=element_blank())
 controlarea20 <- st_intersection(onon20, control_shape)
 controlplot20 <- controlarea20 %>%
   ggplot(aes(fill = value)) + 
   geom_sf(color = "black", size = 1)  +
   scale_fill_viridis_c(option = "C", limits = c(1, 800), name = "Housing Units") +
-  ggtitle("2020 Housing Units in Control Area")
+  ggtitle("2020 Housing Units in Control Area") +
+  theme_minimal() +
+  theme(axis.line=element_blank(),axis.text.x=element_blank(), 
+        axis.text.y=element_blank(),axis.ticks=element_blank(),
+        axis.title.x=element_blank(), axis.title.y=element_blank())
 grid.arrange(controlplot10, controlplot20, ncol = 2)
+
+controlplotoverlap <- ggplot() +
+  geom_sf(data = controlarea10, color = "black", alpha = .2) + 
+  geom_sf(data = controlarea20, color = "red", alpha = .2)+
+  scale_fill_viridis_c(option = "C", limits = c(1, 800), name = "Housing Units") +
+  ggtitle("Block Borders in Control Area") +
+  theme_minimal()+
+  theme(axis.line=element_blank(),axis.text.x=element_blank(), 
+        axis.text.y=element_blank(),axis.ticks=element_blank(),
+        axis.title.x=element_blank(), axis.title.y=element_blank())
+controlplotoverlap
 
 controlarea10 <- st_make_valid(controlarea10)
 controlarea20 <- st_make_valid(controlarea20)
@@ -201,7 +326,11 @@ controldensplot10 <- controlarea10 |>
   scale_fill_viridis_c(option = "C", 
                        name = "Housing Units per Square KM", 
                        limits = set_units(c(1, 10000))) +
-  ggtitle("2010 Housing Density in Control Area")
+  ggtitle("2010 Housing Density in Control Area") +
+  theme_minimal() +
+  theme(axis.line=element_blank(),axis.text.x=element_blank(), 
+        axis.text.y=element_blank(),axis.ticks=element_blank(),
+        axis.title.x=element_blank(), axis.title.y=element_blank())
 controldensplot20 <- controlarea20 |>
   filter(!is.nan(density)) |>
   ggplot(aes(fill = density)) + 
@@ -209,7 +338,11 @@ controldensplot20 <- controlarea20 |>
   scale_fill_viridis_c(option = "C", 
                        name = "Housing Units per Square KM", 
                        limits = set_units(c(1, 10000))) +
-  ggtitle("2020 Housing Density in Control Area")
+  ggtitle("2020 Housing Density in Control Area") +
+  theme_minimal() +
+  theme(axis.line=element_blank(),axis.text.x=element_blank(), 
+        axis.text.y=element_blank(),axis.ticks=element_blank(),
+        axis.title.x=element_blank(), axis.title.y=element_blank())
 grid.arrange(controldensplot10, controldensplot20, ncol = 2)
 
 # doing log density
@@ -228,14 +361,22 @@ controllnplot10 <- controlarea10 |>
   scale_fill_viridis_c(option = "C", 
                        name = "Log of Housing Units per Square KM", 
                        limits = set_units(c(1, 17))) +
-  ggtitle("2010 Log of Housing Density in Control Area")
+  ggtitle("2010 Log of Housing Density in Control Area") +
+  theme_minimal() +
+  theme(axis.line=element_blank(),axis.text.x=element_blank(), 
+        axis.text.y=element_blank(),axis.ticks=element_blank(),
+        axis.title.x=element_blank(), axis.title.y=element_blank())
 controllnplot20 <- controlarea20 |>
   ggplot(aes(fill = logdens)) + 
   geom_sf(color = "black", size = 1)  +
   scale_fill_viridis_c(option = "C", 
                        name = "Log of Housing Units per Square KM", 
                        limits = set_units(c(1, 17))) +
-  ggtitle("2020 Log of Housing Density in Control Area")
+  ggtitle("2020 Log of Housing Density in Control Area") +
+  theme_minimal() +
+  theme(axis.line=element_blank(),axis.text.x=element_blank(), 
+        axis.text.y=element_blank(),axis.ticks=element_blank(),
+        axis.title.x=element_blank(), axis.title.y=element_blank())
 grid.arrange(controllnplot10, controllnplot20, ncol = 2)
 
 grid.arrange(controldensplot10, controldensplot20, controllnplot10, controllnplot20, ncol = 2, nrow = 2)
@@ -258,6 +399,164 @@ treatarea20 <- treatarea20 |>
                                   is.finite(density) ~ density,
                                   TRUE ~ NA_real_))
 
+# find the means
+mean(controlarea10$validdensity, na.rm = TRUE) 
+mean(treatarea10$validdensity, na.rm = TRUE)
+mean(controlarea20$validdensity, na.rm = TRUE) 
+mean(treatarea20$validdensity, na.rm = TRUE)
+
+#
+# let's try to create merged blocks!
+#
+
+# try to overlay GEOID names onto the blocks
+treat10labels <- treatarea10 |>
+  ggplot() +
+  geom_sf(color = "black") +
+  theme_minimal()+
+  theme(axis.line=element_blank(),axis.text.x=element_blank(), 
+        axis.text.y=element_blank(),axis.ticks=element_blank(),
+        axis.title.x=element_blank(), axis.title.y=element_blank()) +
+  geom_sf_text(aes(label = bestgeo), size = 3, color = "black")
+
+treat20labels <- treatarea20 |>
+  ggplot() +
+  geom_sf(color = "black") + 
+  theme_minimal()+
+  theme(axis.line=element_blank(),axis.text.x=element_blank(), 
+        axis.text.y=element_blank(),axis.ticks=element_blank(),
+        axis.title.x=element_blank(), axis.title.y=element_blank()) +
+  geom_sf_text(aes(label = bestgeo), size = 3, color = "black")
+
+
+
+# combining the block borders for both censuses
+
+# making the data for the treatment area 
+treat1020area <- st_intersection(treatarea10, treatarea20)
+# turning this into a plot for 2010 housing units
+treat1020plot1 <- treat1020area %>%
+  ggplot(aes(fill = value)) + 
+  geom_sf(color = "black", size = 1) + 
+  scale_fill_viridis_c(option = "C", limits = c(1, 800), name = "Housing Units") +
+  ggtitle("2010 Housing Units in Treatment Area, New Borders") +
+  theme_minimal() +
+  theme(axis.line=element_blank(),axis.text.x=element_blank(), 
+        axis.text.y=element_blank(),axis.ticks=element_blank(),
+        axis.title.x=element_blank(), axis.title.y=element_blank())
+# doing the same for 2020 housing units
+treat1020plot2 <- treat1020area %>%
+  ggplot(aes(fill = value.1)) + 
+  geom_sf(color = "black", size = 1) + 
+  scale_fill_viridis_c(option = "C", limits = c(1, 800), name = "Housing Units") +
+  ggtitle("2020 Housing Units in Treatment Area, New Borders") +
+  theme_minimal() +
+  theme(axis.line=element_blank(),axis.text.x=element_blank(), 
+        axis.text.y=element_blank(),axis.ticks=element_blank(),
+        axis.title.x=element_blank(), axis.title.y=element_blank())
+
+# creating a variable for change between 2010 and 2020
+treat1020area <- treat1020area |>
+  mutate(unitchange = value.1 - value)
+# let's see it plotted!
+treatchangeplot <- treat1020area %>%
+  ggplot(aes(fill = unitchange)) + 
+  geom_sf(color = "black", size = 1) + 
+  scale_fill_viridis_c(option = "C", limits = c(1, 800), name = "Housing Units") +
+  ggtitle("Treatment Area Change in Housing Units") +
+  theme_minimal() +
+  theme(axis.line=element_blank(),axis.text.x=element_blank(), 
+        axis.text.y=element_blank(),axis.ticks=element_blank(),
+        axis.title.x=element_blank(), axis.title.y=element_blank())
+treatchangeplot
+
+# okay, let's do this for the control area
+
+control1020area <- st_intersection(controlarea10, controlarea20)
+control1020area <- control1020area |>
+  mutate(unitchange = value.1 - value)
+controlchangeplot <- control1020area |>
+  ggplot(aes(fill = unitchange)) + 
+  geom_sf(color = "black", size = 1) + 
+  scale_fill_viridis_c(option = "C", limits = c(1, 800), name = "Housing Units") +
+  ggtitle("Control Area Change in Housing Units") +
+  theme_minimal() +
+  theme(axis.line=element_blank(),axis.text.x=element_blank(), 
+        axis.text.y=element_blank(),axis.ticks=element_blank(),
+        axis.title.x=element_blank(), axis.title.y=element_blank())
+grid.arrange(treatchangeplot, controlchangeplot, ncol= 2)
+
+
+# now let's make a dummy variable for treatment!
+
+treat1020area <- treat1020area |>
+  mutate(treatment = 1)
+
+control1020area <- control1020area |>
+  mutate(treatment = 0)
+
+# time to give these shapefiles a haircut
+
+trimtreatarea <- treat1020area |>
+  filter(value != 0 | value.1 != 0)
+
+trimcontrolarea <- control1020area |>
+  filter(value != 0 | value.1 != 0) 
+
+
+# can we bind these two together?
+
+comparecontrol <- control1020area |>
+  select(GEOID, value, STATEFP, COUNTYFP, TRACTCE, NAME.1, value.1, geometry, unitchange, area, density, density.1, treatment)
+comparetreat <- treat1020area |>
+  select(GEOID, value, STATEFP, COUNTYFP, TRACTCE, NAME.1, value.1, geometry, unitchange, area, density, density.1, treatment)
+bindedarea <- rbind(comparecontrol, comparetreat)
+
+
+# great. let's (FINALLY) do some matching!
+
+bindedarea <- bindedarea |>
+  filter(value > 0 | value.1 > 0)
+bindedarea <- bindedarea |>
+  filter(!is.infinite(density) & !is.infinite(density.1)) 
+bindedarea <- bindedarea |>
+  mutate(densitydiff = density.1 - density)
+
+#first with no matching
+nomatch <- bindedarea |>
+  matchit(formula = treatment ~ value + area,
+          method = NULL, distance = "glm")
+nomatcheddata <- match.data(nomatch)
+mnull <- lm(unitchange ~ treatment, data = nomatcheddata, weights = weights)
+
+# now some matching models
+match0 <- bindedarea |>
+  matchit(formula = treatment ~ value + area,
+          method = "nearest", distance = "glm")
+matched0data <- match.data(match0)
+m0 <- lm(unitchange ~ treatment, data = matched0data, weights = weights)
+
+plot(match0, type = "jitter", interactive = FALSE)
+
+match1 <- matchit(formula = treatment ~ value + area,
+                  data = bindedarea |> filter(unitchange > 0),
+                  method = "nearest", distance = "glm")
+matched1data <- match.data(match1)
+m1 <- lm(unitchange ~ treatment, data = matched1data, weights = weights)
+
+match2 <- bindedarea |>
+  matchit(formula = treatment ~ value + area,
+          method = "optimal", distance = "glm")
+matched2data <- match.data(match2)
+m2 <- lm(unitchange ~ treatment, data = matched2data, weights = weights)
+
+match3 <- matchit(formula = treatment ~ value + area,
+                  data = bindedarea |> filter(unitchange > 0),
+                  method = "optimal", distance = "glm")
+matched3data <- match.data(match3)
+m3 <- lm(unitchange ~ treatment, data = matched3data, weights = weights)
+
+modelsummary(list("Model 1" = m0, "Model 2" = m1, "Model 3" = m2, "Model 4" = m3))
 
 
 
